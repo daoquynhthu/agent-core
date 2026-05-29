@@ -1,0 +1,1 @@
+- Always run `bun typecheck` from package directories (e.g., `packages/opencode`), never `tsc` directly.
