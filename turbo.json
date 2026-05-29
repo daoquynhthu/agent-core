@@ -1,0 +1,19 @@
+{
+  "$schema": "https://v2-8-13.turborepo.dev/schema.json",
+  "globalEnv": ["CI", "OPENCODE_DISABLE_SHARE"],
+  "globalPassThroughEnv": ["CI", "OPENCODE_DISABLE_SHARE"],
+  "tasks": {
+    "typecheck": {},
+    "build": {},
+    "opencode#test": {
+      "dependsOn": [],
+      "outputs": [],
+      "passThroughEnv": ["*"]
+    },
+    "opencode#test:ci": {
+      "dependsOn": [],
+      "outputs": [".artifacts/unit/junit.xml"],
+      "passThroughEnv": ["*"]
+    }
+  }
+}
