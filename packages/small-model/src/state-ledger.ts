@@ -1,5 +1,22 @@
 import type { ContextItem, ContextStatus } from "./context-item"
 
+export type LedgerEventType =
+  | "context_item_created"
+  | "context_item_verified"
+  | "context_item_deprecated"
+  | "context_item_rejected"
+  | "context_item_updated"
+  | "artifact_proposed"
+  | "artifact_accepted"
+  | "artifact_rejected"
+
+export interface LedgerEvent {
+  id: string
+  type: LedgerEventType
+  timestamp: string
+  data: Record<string, unknown>
+}
+
 export interface LedgerEntry {
   id: string
   kind: string
@@ -20,6 +37,7 @@ export interface LedgerSnapshot {
   entries: LedgerEntry[]
   artifacts: ArtifactRecord[]
   updatedAt: string
+  eventCount: number
 }
 
 export interface ArtifactRecord {
@@ -34,6 +52,7 @@ export interface ArtifactRecord {
 export class StateLedger {
   private entries: LedgerEntry[] = []
   private artifacts: ArtifactRecord[] = []
+  private events: LedgerEvent[] = []
   private baseDir: string = ".agent-smith"
   private loaded = false
 
@@ -45,8 +64,8 @@ export class StateLedger {
     return `${this.baseDir}/state.json`
   }
 
-  private get artifactsDir(): string {
-    return `${this.baseDir}/artifacts`
+  private get eventsPath(): string {
+    return `${this.baseDir}/events.jsonl`
   }
 
   async load(): Promise<void> {
@@ -61,6 +80,16 @@ export class StateLedger {
       this.entries = []
       this.artifacts = []
     }
+    try {
+      const { readFile } = await import("fs/promises")
+      const raw = await readFile(this.eventsPath, "utf-8")
+      this.events = raw
+        .split("\n")
+        .filter((l: string) => l.trim())
+        .map((l: string) => JSON.parse(l) as LedgerEvent)
+    } catch {
+      this.events = []
+    }
     this.loaded = true
   }
 
@@ -68,7 +97,6 @@ export class StateLedger {
     try {
       const { mkdir } = await import("fs/promises")
       await mkdir(this.baseDir, { recursive: true })
-      await mkdir(this.artifactsDir, { recursive: true })
     } catch {
       /* best effort */
     }
@@ -76,27 +104,88 @@ export class StateLedger {
 
   async save(): Promise<void> {
     await this.ensureDir()
-    const { writeFile } = await import("fs/promises")
+    const { writeFile, appendFile } = await import("fs/promises")
     const snapshot: LedgerSnapshot = {
       version: "CK-v1",
       activePhase: "active",
       entries: this.entries,
       artifacts: this.artifacts,
       updatedAt: new Date().toISOString(),
+      eventCount: this.events.length,
     }
     await writeFile(this.statePath, JSON.stringify(snapshot, null, 2), "utf-8")
   }
 
-  addEntry(entry: Omit<LedgerEntry, "createdAt" | "updatedAt">): void {
-    const now = new Date().toISOString()
-    this.entries.push({ ...entry, createdAt: now, updatedAt: now })
+  private async appendEvent(event: LedgerEvent): Promise<void> {
+    this.events.push(event)
+    try {
+      const { appendFile } = await import("fs/promises")
+      await appendFile(this.eventsPath, JSON.stringify(event) + "\n", "utf-8")
+    } catch {
+    }
   }
 
-  updateEntry(id: string, updates: Partial<LedgerEntry>): void {
+  async addEntry(entry: Omit<LedgerEntry, "createdAt" | "updatedAt">): Promise<void> {
+    const now = new Date().toISOString()
+    const full: LedgerEntry = { ...entry, createdAt: now, updatedAt: now }
+    this.entries.push(full)
+    await this.appendEvent({
+      id: `evt-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      type: "context_item_created",
+      timestamp: now,
+      data: { entryId: entry.id, kind: entry.kind, status: entry.status },
+    })
+  }
+
+  async updateEntry(id: string, updates: Partial<LedgerEntry>): Promise<void> {
     const entry = this.entries.find((e) => e.id === id)
-    if (entry) {
-      Object.assign(entry, updates, { updatedAt: new Date().toISOString() })
-    }
+    if (!entry) return
+    Object.assign(entry, updates, { updatedAt: new Date().toISOString() })
+    await this.appendEvent({
+      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      type: "context_item_updated",
+      timestamp: new Date().toISOString(),
+      data: { entryId: id, changes: Object.keys(updates) },
+    })
+  }
+
+  async verifyEntry(id: string): Promise<void> {
+    const entry = this.entries.find((e) => e.id === id)
+    if (!entry) return
+    entry.status = "verified"
+    entry.updatedAt = new Date().toISOString()
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "context_item_verified",
+      timestamp: entry.updatedAt,
+      data: { entryId: id },
+    })
+  }
+
+  async deprecateEntry(id: string): Promise<void> {
+    const entry = this.entries.find((e) => e.id === id)
+    if (!entry) return
+    entry.status = "deprecated"
+    entry.updatedAt = new Date().toISOString()
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "context_item_deprecated",
+      timestamp: entry.updatedAt,
+      data: { entryId: id },
+    })
+  }
+
+  async rejectEntry(id: string): Promise<void> {
+    const entry = this.entries.find((e) => e.id === id)
+    if (!entry) return
+    entry.status = "rejected"
+    entry.updatedAt = new Date().toISOString()
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "context_item_rejected",
+      timestamp: entry.updatedAt,
+      data: { entryId: id },
+    })
   }
 
   getActiveDecisions(scope?: string[]): LedgerEntry[] {
@@ -115,8 +204,38 @@ export class StateLedger {
     })
   }
 
-  addArtifact(record: Omit<ArtifactRecord, "createdAt">): void {
+  async addArtifact(record: Omit<ArtifactRecord, "createdAt">): Promise<void> {
     this.artifacts.push({ ...record, createdAt: new Date().toISOString() })
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "artifact_proposed",
+      timestamp: new Date().toISOString(),
+      data: { artifactId: record.id, type: record.type },
+    })
+  }
+
+  async acceptArtifact(id: string): Promise<void> {
+    const art = this.artifacts.find((a) => a.id === id)
+    if (!art) return
+    art.status = "accepted"
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "artifact_accepted",
+      timestamp: new Date().toISOString(),
+      data: { artifactId: id },
+    })
+  }
+
+  async rejectArtifact(id: string): Promise<void> {
+    const art = this.artifacts.find((a) => a.id === id)
+    if (!art) return
+    art.status = "rejected"
+    await this.appendEvent({
+      id: `evt-${Date.now()}`,
+      type: "artifact_rejected",
+      timestamp: new Date().toISOString(),
+      data: { artifactId: id },
+    })
   }
 
   toContextItems(): ContextItem[] {
@@ -136,8 +255,17 @@ export class StateLedger {
     }))
   }
 
+  getRecentEvents(count: number = 50): LedgerEvent[] {
+    return this.events.slice(-count)
+  }
+
+  getEventsByType(type: LedgerEventType): LedgerEvent[] {
+    return this.events.filter((e) => e.type === type)
+  }
+
   clear(): void {
     this.entries = []
     this.artifacts = []
+    this.events = []
   }
 }

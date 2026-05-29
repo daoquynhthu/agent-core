@@ -30,6 +30,37 @@ export interface Evidence {
   contentHash?: string
 }
 
+export class EvidenceRegistry {
+  private store = new Map<string, Evidence>()
+
+  register(evidence: Evidence): void {
+    this.store.set(evidence.id, evidence)
+  }
+
+  get(id: string): Evidence | undefined {
+    return this.store.get(id)
+  }
+
+  resolveAll(ids: string[]): { resolved: Evidence[]; missing: string[] } {
+    const resolved: Evidence[] = []
+    const missing: string[] = []
+    for (const id of ids) {
+      const ev = this.store.get(id)
+      if (ev) resolved.push(ev)
+      else missing.push(id)
+    }
+    return { resolved, missing }
+  }
+
+  has(id: string): boolean {
+    return this.store.has(id)
+  }
+
+  clear(): void {
+    this.store.clear()
+  }
+}
+
 const STATUS_WEIGHT: Record<ContextStatus, number> = {
   active: 1.0,
   verified: 0.95,

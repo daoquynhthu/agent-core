@@ -1,3 +1,5 @@
+import type { EvidenceRegistry } from "./context-item"
+
 export type ClaimType = "factual" | "judgment" | "recommendation"
 
 export interface Claim {
@@ -16,6 +18,12 @@ export interface DetectionResult {
 }
 
 export class Detector {
+  private evidenceRegistry?: EvidenceRegistry
+
+  setEvidenceRegistry(registry: EvidenceRegistry): void {
+    this.evidenceRegistry = registry
+  }
+
   analyze(response: string, toolCalls: number): DetectionResult {
     const reasons: string[] = []
     let score = 1.0
@@ -54,6 +62,12 @@ export class Detector {
 
     const claims = this.extractClaims(response)
 
+    const evidenceBinding = this.checkEvidenceBinding(claims)
+    if (evidenceBinding.score < 1.0) {
+      reasons.push(`${evidenceBinding.unboundedClaims.length} factual claim(s) without evidence binding`)
+      score *= evidenceBinding.score
+    }
+
     return {
       score,
       isHallucination: score < 0.5,
@@ -64,11 +78,12 @@ export class Detector {
 
   extractClaims(text: string): Claim[] {
     const claims: Claim[] = []
-    const sentences = text.split(/[.?!\n]+/).filter((s) => s.trim().length > 20)
+    const textLines = text.split(/[.?!\n]+/).filter((s) => s.trim().length > 20)
 
-    for (const sentence of sentences) {
-      const lower = sentence.toLowerCase().trim()
-      const hasEvidence = /(?:according to|from|in file|see|refer to|based on|as shown|as documented)/i.test(lower)
+    for (const line of textLines) {
+      const lower = line.toLowerCase().trim()
+      const evidenceIds = this.resolveEvidenceRefs(lower)
+      const hasEvidence = evidenceIds.length > 0
       let type: ClaimType = "judgment"
 
       if (hasEvidence || /(?:is|was|are|were|has|have|contains|returns|implements)/i.test(lower)) {
@@ -79,10 +94,10 @@ export class Detector {
       }
 
       claims.push({
-        content: sentence.trim(),
+        content: line.trim(),
         type,
         hasEvidence,
-        evidenceIds: hasEvidence ? ["unknown_source"] : [],
+        evidenceIds,
         confidence: hasEvidence ? 0.8 : 0.4,
       })
     }
@@ -90,9 +105,30 @@ export class Detector {
     return claims
   }
 
+  private resolveEvidenceRefs(text: string): string[] {
+    const ids: string[] = []
+    const refPatterns = [
+      /ev-([a-z0-9-]+)/gi,
+      /evidence[:\s]+([a-zA-Z0-9_-]+)/gi,
+      /\[ev:([a-zA-Z0-9_-]+)\]/gi,
+    ]
+    for (const pattern of refPatterns) {
+      let match: RegExpExecArray | null
+      while ((match = pattern.exec(text)) !== null) {
+        ids.push(match[1])
+      }
+    }
+
+    if (this.evidenceRegistry) {
+      return ids.filter((id) => this.evidenceRegistry!.has(id))
+    }
+
+    return ids
+  }
+
   checkEvidenceBinding(claims: Claim[]): { score: number; unboundedClaims: Claim[] } {
     const factualClaims = claims.filter((c) => c.type === "factual")
-    const unbounded = factualClaims.filter((c) => !c.hasEvidence)
+    const unbounded = factualClaims.filter((c) => c.evidenceIds.length === 0)
     const ratio = factualClaims.length > 0 ? unbounded.length / factualClaims.length : 0
     const score = Math.max(0, 1 - ratio)
     return { score, unboundedClaims: unbounded }

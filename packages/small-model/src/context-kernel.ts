@@ -145,7 +145,8 @@ export class ContextKernel {
       allowUnknown: input.allowUnknown,
     }
 
-    const renderedPrompt = this.compiler.renderMinimal(packet)
+    const compiled = this.compiler.renderMinimal(packet)
+    const renderedPrompt = compiled.userPrompt
 
     const tokenReport: TokenReport = {
       availableInput: tokenBudget.inputMax,

@@ -1,4 +1,20 @@
 import type { TaskMode } from "./task-mode"
+import type { StateLedger } from "./state-ledger"
+import {
+  RouteSchema,
+  CheckConstraintsSchema,
+  DiffReviewSchema,
+  RankFilesSchema,
+  ExtractFactsSchema,
+  SummarizeStructuredSchema,
+  ClassifyErrorSchema,
+  SelectTestsSchema,
+  DetectUncertaintySchema,
+  ArchitectureDesignSchema,
+  ComplexReviewSchema,
+  ConstraintCheckSchema,
+} from "./schemas"
+import type { z } from "zod"
 
 export type ArtifactType =
   | "TaskSpec"
@@ -93,18 +109,6 @@ export interface ArchitectureDecision extends ArtifactBase {
   supersedes: string[]
 }
 
-export type AgentArtifact =
-  | TaskSpec
-  | PatchPlan
-  | DiffSummary
-  | RiskReview
-  | DecisionProposal
-  | ConstraintViolation
-  | ExplorationResult
-  | ArchitectureDecision
-  | TestReport
-  | MemoryUpdateProposal
-
 export interface TestReport extends ArtifactBase {
   type: "TestReport"
   command: string
@@ -120,6 +124,36 @@ export interface MemoryUpdateProposal extends ArtifactBase {
   content: string
   reason: string
   confidence: number
+}
+
+export type AgentArtifact =
+  | TaskSpec
+  | PatchPlan
+  | DiffSummary
+  | RiskReview
+  | DecisionProposal
+  | ConstraintViolation
+  | ExplorationResult
+  | ArchitectureDecision
+  | TestReport
+  | MemoryUpdateProposal
+
+const ARTIFACT_TO_SCHEMA: Record<string, z.ZodTypeAny> = {
+  TaskSpec: RouteSchema,
+  PatchPlan: RouteSchema,
+  DiffSummary: DiffReviewSchema,
+  RiskReview: ComplexReviewSchema,
+  TestReport: RouteSchema,
+  DecisionProposal: RouteSchema,
+  ConstraintViolation: CheckConstraintsSchema,
+  ExplorationResult: RouteSchema,
+  ArchitectureDecision: RouteSchema,
+  MemoryUpdateProposal: RouteSchema,
+}
+
+export interface ArtifactValidationResult {
+  valid: boolean
+  errors: string[]
 }
 
 export class ArtifactSerializer {
@@ -154,5 +188,108 @@ export class ArtifactSerializer {
       }
     }
     return artifacts
+  }
+}
+
+export class ArtifactRegistry {
+  private ledger: StateLedger
+  private serializer: ArtifactSerializer
+  private artifacts: AgentArtifact[] = []
+
+  constructor(ledger: StateLedger) {
+    this.ledger = ledger
+    this.serializer = new ArtifactSerializer()
+  }
+
+  validate(artifact: AgentArtifact): ArtifactValidationResult {
+    const schema = ARTIFACT_TO_SCHEMA[artifact.type]
+    if (!schema) {
+      return { valid: true, errors: [] }
+    }
+
+    const result = schema.safeParse(artifact)
+    if (result.success) {
+      return { valid: true, errors: [] }
+    }
+
+    return {
+      valid: false,
+      errors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+    }
+  }
+
+  async propose(artifact: AgentArtifact): Promise<ArtifactValidationResult> {
+    const validation = this.validate(artifact)
+    if (!validation.valid) {
+      return validation
+    }
+
+    this.artifacts.push(artifact)
+
+    await this.ledger.addArtifact({
+      id: artifact.id,
+      type: artifact.type,
+      producedBy: artifact.producedBy,
+      summary: JSON.stringify(artifact).slice(0, 200),
+      status: "pending_review",
+    })
+
+    return { valid: true, errors: [] }
+  }
+
+  async accept(id: string): Promise<ArchitectureDecision | null> {
+    const artifact = this.artifacts.find((a) => a.id === id)
+    if (!artifact) return null
+
+    await this.ledger.acceptArtifact(id)
+
+    if (artifact.type === "DecisionProposal") {
+      const proposal = artifact as DecisionProposal
+      const decision: ArchitectureDecision = {
+        id: `D-${id}`,
+        type: "ArchitectureDecision",
+        producedBy: artifact.producedBy,
+        status: "accepted",
+        evidenceIds: artifact.evidenceIds,
+        createdAt: new Date().toISOString(),
+        content: proposal.content,
+        scope: [],
+        supersedes: [],
+      }
+
+      this.artifacts.push(decision)
+
+      await this.ledger.addEntry({
+        id: decision.id,
+        kind: "architecture_decision",
+        content: decision.content,
+        source: "human_decision",
+        status: "active",
+        scope: decision.scope,
+        confidence: 0.95,
+        evidenceIds: decision.evidenceIds,
+        conflictsWith: [],
+      })
+
+      return decision
+    }
+
+    return null
+  }
+
+  async reject(id: string): Promise<void> {
+    await this.ledger.rejectArtifact(id)
+    const artifact = this.artifacts.find((a) => a.id === id)
+    if (artifact) {
+      artifact.status = "rejected"
+    }
+  }
+
+  getPendingByType(type: ArtifactType): AgentArtifact[] {
+    return this.artifacts.filter((a) => a.type === type && a.status === "pending_review")
+  }
+
+  getAll(): AgentArtifact[] {
+    return [...this.artifacts]
   }
 }
