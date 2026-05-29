@@ -143,9 +143,11 @@ const allTargets: {
   },
 ]
 
+const forceOs = process.argv.find((a) => a.startsWith("--force-os="))?.split("=")[1]
 const targets = singleFlag
   ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
+      const matchOs = forceOs ?? process.platform
+      if (item.os !== matchOs || item.arch !== process.arch) {
         return false
       }
 
