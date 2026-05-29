@@ -41,7 +41,9 @@ export type { AgentArtifact, ArtifactType, ArtifactStatus, TaskSpec, PatchPlan, 
 export { DriftGuard } from "./drift-guard"
 export type { DriftIssue, DriftIssueType, DriftGuardConfig } from "./drift-guard"
 export { ContextKernel } from "./context-kernel"
-export type { KernelInput, KernelOutput, ProcessedResult } from "./context-kernel"
+export type { KernelInput, CompileResult, CompileReport, TokenReport } from "./context-kernel"
+export { parseModelOutput, getSchemaForMode, formatOutputSchema, RouteSchema, CheckConstraintsSchema, ConstraintCheckSchema, DiffReviewSchema } from "./schemas"
+export type { ParsedMode, ParseResult } from "./schemas"
 
 export interface SmallModelAdapter {
   determineTier(modelId: string): TierLevel

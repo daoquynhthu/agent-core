@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode",
-  "description": "AI-powered development tool",
+  "name": "agent-core",
+  "description": "Agent work platform with small-model adaptation",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",
@@ -10,7 +10,7 @@
     "lint": "oxlint",
     "typecheck": "bun turbo typecheck",
     "postinstall": "bun run --cwd packages/opencode fix-node-pty",
-    "test": "echo 'do not run tests from root' && exit 1"
+    "test": "bun run --cwd packages/small-model test"
   },
   "workspaces": {
     "packages": [
@@ -102,7 +102,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/anomalyco/opencode"
+    "url": "https://github.com/daoquynhthu/agent-core.git"
   },
   "license": "MIT",
   "prettier": {

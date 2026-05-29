@@ -1,5 +1,6 @@
 import type { TaskMode } from "./task-mode"
 import { TASK_MODE_CONFIGS } from "./task-mode"
+import { parseModelOutput, formatOutputSchema } from "./schemas"
 import { Detector } from "./detector"
 import type { Claim } from "./detector"
 
@@ -10,6 +11,7 @@ export type DriftIssueType =
   | "instruction_conflict"
   | "confidence_mismatch"
   | "version_drift"
+  | "tier_violation"
 
 export interface DriftIssue {
   type: DriftIssueType
@@ -28,6 +30,20 @@ export interface DriftGuardConfig {
   evidenceRequired: boolean
 }
 
+interface HardValidation {
+  issues: DriftIssue[]
+  parsed: unknown | null
+}
+
+interface RuleValidation {
+  issues: DriftIssue[]
+}
+
+interface ModelValidation {
+  issues: DriftIssue[]
+  claims: Claim[]
+}
+
 export class DriftGuard {
   private detector = new Detector()
 
@@ -35,147 +51,151 @@ export class DriftGuard {
     output: string,
     config: DriftGuardConfig,
     toolCalls: number,
-  ): { passed: boolean; issues: DriftIssue[]; score: number } {
+  ): { passed: boolean; issues: DriftIssue[]; score: number; parsed: unknown | null } {
     const issues: DriftIssue[] = []
 
-    const schemaIssue = this.checkSchemaDrift(output, config)
-    if (schemaIssue) issues.push(schemaIssue)
+    const hard = this.hardValidate(output, config)
+    issues.push(...hard.issues)
 
-    const scopeIssue = this.checkScopeDrift(output, config)
-    if (scopeIssue) issues.push(scopeIssue)
-
-    const versionIssue = this.checkVersionDrift(output, config)
-    if (versionIssue) issues.push(versionIssue)
-
-    const claims = this.detector.extractClaims(output)
-    const evidenceIssue = this.checkUnsupportedClaims(claims, config)
-    issues.push(...evidenceIssue)
-
-    const instructionIssue = this.checkInstructionConflict(output, config)
-    if (instructionIssue) issues.push(instructionIssue)
-
-    const confidenceIssue = this.checkConfidenceMismatch(claims, config)
-    if (confidenceIssue) issues.push(confidenceIssue)
+    const rule = this.ruleValidate(output, config)
+    issues.push(...rule.issues)
 
     const detectionResult = this.detector.analyze(output, toolCalls)
-    const score = Math.max(0, detectionResult.score - issues.length * 0.1)
+    const modelVal = this.modelValidate(output, detectionResult.claims ?? [], config)
+    issues.push(...modelVal.issues)
+
+    const errorCount = issues.filter((i) => i.severity === "error").length
+    const warningCount = issues.filter((i) => i.severity === "warning").length
+    const score = Math.max(0, 1.0 - errorCount * 0.35 - warningCount * 0.1)
 
     return {
-      passed: issues.filter((i) => i.severity === "error").length === 0,
+      passed: errorCount === 0,
       issues,
       score,
+      parsed: hard.parsed,
     }
   }
 
-  private checkSchemaDrift(output: string, config: DriftGuardConfig): DriftIssue | null {
-    const modeConfig = TASK_MODE_CONFIGS[config.mode]
-    if (!modeConfig) return null
+  private hardValidate(output: string, config: DriftGuardConfig): HardValidation {
+    const issues: DriftIssue[] = []
+    let parsed: unknown = null
 
-    const schemaFields = (modeConfig.outputSchema as any)?.fields
-    if (!schemaFields) return null
-
-    const lowercaseOutput = output.toLowerCase()
-    const fieldNames = Object.keys(schemaFields)
-
-    const missingFields = fieldNames.filter((f) => {
-      const fieldKey = f.replace(/([A-Z])/g, "_$1").toLowerCase()
-      return !lowercaseOutput.includes(f.toLowerCase()) && !lowercaseOutput.includes(fieldKey)
-    })
-
-    if (missingFields.length > 0 && missingFields.length === fieldNames.length) {
-      return {
+    // Layer 1: JSON parse
+    try {
+      parsed = JSON.parse(output)
+    } catch {
+      issues.push({
         type: "schema_drift",
         severity: "error",
-        message: `Output does not match expected schema for mode ${config.mode}. Missing fields: ${missingFields.join(", ")}`,
-      }
+        message: "Output is not valid JSON. Models must return structured JSON output.",
+      })
+      return { issues, parsed: null }
     }
 
-    return null
-  }
-
-  private checkScopeDrift(output: string, config: DriftGuardConfig): DriftIssue | null {
-    if (config.forbiddenActions.length === 0) return null
-    const lower = output.toLowerCase()
-    for (const action of config.forbiddenActions) {
-      if (lower.includes(action.toLowerCase())) {
-        return {
-          type: "scope_drift",
-          severity: "error",
-          message: `Output mentions forbidden action: "${action}"`,
-        }
-      }
+    // Layer 2: Zod schema
+    const result = parseModelOutput(config.mode, output)
+    if (!result.success) {
+      const schemaStr = formatOutputSchema(config.mode)
+      issues.push({
+        type: "schema_drift",
+        severity: "error",
+        message: `Output does not match schema: ${result.error}. Expected format:\n${schemaStr}`,
+      })
+      return { issues, parsed }
     }
-    return null
+
+    return { issues, parsed }
   }
 
-  private checkVersionDrift(output: string, config: DriftGuardConfig): DriftIssue | null {
-    const versionPatterns = [
-      ...config.allowedVersions.map((v) => v.toLowerCase()),
-      config.activeVersion.toLowerCase(),
-    ]
-    const versionRegex = /v?\d+[.-][a-z0-9]+/gi
-    const matches = output.match(versionRegex)
-    if (!matches) return null
-
-    for (const match of matches) {
-      if (!versionPatterns.some((vp) => match.toLowerCase().includes(vp))) {
-        return {
-          type: "version_drift",
-          severity: "warning",
-          message: `References unknown version "${match}". Active version is ${config.activeVersion}.`,
-        }
-      }
-    }
-    return null
-  }
-
-  private checkUnsupportedClaims(claims: Claim[], config: DriftGuardConfig): DriftIssue[] {
-    if (!config.evidenceRequired) return []
+  private ruleValidate(output: string, config: DriftGuardConfig): RuleValidation {
     const issues: DriftIssue[] = []
 
-    for (const claim of claims) {
-      if (claim.type === "factual" && !claim.hasEvidence) {
+    // Scope drift: forbidden actions
+    if (config.forbiddenActions.length > 0) {
+      const lower = output.toLowerCase()
+      for (const action of config.forbiddenActions) {
+        if (lower.includes(action.toLowerCase())) {
+          issues.push({
+            type: "scope_drift",
+            severity: "error",
+            message: `Output mentions forbidden action: "${action}"`,
+          })
+        }
+      }
+    }
+
+    // Version drift
+    if (config.activeVersion) {
+      const versionPatterns = [
+        ...config.allowedVersions.map((v) => v.toLowerCase()),
+        config.activeVersion.toLowerCase(),
+      ]
+      const versionRegex = /v?\d+[.-][a-z0-9]+/gi
+      const matches = output.match(versionRegex)
+      if (matches) {
+        for (const match of matches) {
+          if (!versionPatterns.some((vp) => match.toLowerCase().includes(vp))) {
+            issues.push({
+              type: "version_drift",
+              severity: "warning",
+              message: `References unknown version "${match}". Active version is ${config.activeVersion}.`,
+            })
+          }
+        }
+      }
+    }
+
+    return { issues }
+  }
+
+  private modelValidate(output: string, claims: Claim[], config: DriftGuardConfig): ModelValidation {
+    const issues: DriftIssue[] = []
+
+    // Unsupported factual claims
+    if (config.evidenceRequired) {
+      for (const claim of claims) {
+        if (claim.type === "factual" && !claim.hasEvidence) {
+          issues.push({
+            type: "unsupported_claim",
+            severity: "warning",
+            message: `Factual claim without evidence: "${claim.content.slice(0, 80)}..."`,
+          })
+        }
+      }
+    }
+
+    // Confidence mismatch
+    if (claims.length > 0) {
+      const highConfidenceClaims = claims.filter((c) => c.confidence > 0.8 && !c.hasEvidence)
+      if (highConfidenceClaims.length > 0) {
         issues.push({
-          type: "unsupported_claim",
+          type: "confidence_mismatch",
           severity: "warning",
-          message: `Factual claim without evidence: "${claim.content.slice(0, 80)}..."`,
+          message: `${highConfidenceClaims.length} claim(s) have high confidence but no evidence.`,
         })
       }
     }
 
-    return issues
-  }
-
-  private checkInstructionConflict(output: string, config: DriftGuardConfig): DriftIssue | null {
-    const unknownPatterns = [
-      /if (?:you are|you're) (?:not |un )?sure/i,
-      /if uncertain/i,
-      /i (?:don't|do not) know/i,
-    ]
-
-    const hasUnknownMarkers = unknownPatterns.some((p) => p.test(output))
-
-    if (config.allowUnknown && !hasUnknownMarkers && output.length < 50) {
-      return {
-        type: "instruction_conflict",
-        severity: "warning",
-        message: "Model gave very short output without using UNKNOWN. May be overconfident.",
+    // Instruction conflict: allowUnknown
+    if (config.allowUnknown) {
+      const parsed = this.tryParseJson(output)
+      if (parsed && typeof parsed === "object" && parsed !== null && !("status" in parsed)) {
+        issues.push({
+          type: "instruction_conflict",
+          severity: "warning",
+          message: "Output does not include 'status' field. Model may not be following structured output mode.",
+        })
       }
     }
 
-    return null
+    return { issues, claims }
   }
 
-  private checkConfidenceMismatch(claims: Claim[], config: DriftGuardConfig): DriftIssue | null {
-    if (claims.length === 0) return null
-    const highConfidenceClaims = claims.filter((c) => c.confidence > 0.8 && !c.hasEvidence)
-    if (highConfidenceClaims.length > 0) {
-      return {
-        type: "confidence_mismatch",
-        severity: "warning",
-        message: `${highConfidenceClaims.length} claim(s) have high confidence but no evidence.`,
-      }
+  private tryParseJson(text: string): unknown {
+    try {
+      return JSON.parse(text)
+    } catch {
+      return null
     }
-    return null
   }
 }

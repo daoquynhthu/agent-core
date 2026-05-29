@@ -25,7 +25,7 @@ export const TIER_TOOL_BUDGETS: Record<TierLevel, ToolBudget> = {
   },
   t3: {
     maxToolCallsPerTurn: 6,
-    allowedTools: ["read", "edit", "bash", "glob"],
+    allowedTools: ["read", "edit", "glob", "grep"],
     maxArgs: 3,
     maxOutputLines: 80,
     timeoutMs: 30_000,

@@ -16,6 +16,9 @@
     "./prompt-builder": "./src/prompt-builder.ts",
     "./detector": "./src/detector.ts"
   },
+  "dependencies": {
+    "zod": "catalog:"
+  },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
